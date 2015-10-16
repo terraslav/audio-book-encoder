@@ -1,0 +1,136 @@
+#!/bin/bash
+
+. includes.inc
+# название скрипта
+CAPT="AMR-WB to Vorbis-Ogg encoder"
+
+list_name=mp3pls.m3u
+
+prepare(){	# Процедура поиска медиафайлов
+
+	# определяю путь к файлам
+	work_path=$(zenity --title="Выбери папку для поиска медиафайлов" --file-selection --directory --filename="`pwd`")
+	if [ -d "${work_path}" ]; then cd "${work_path}"; update_conf; else quit_script; fi
+
+	# поиск медиафайлов
+	notify-send "$CAPT" "Выполняю поиск медиафайлов" -t 2000
+	find . -iname "*.awb" -type f > "$pl"
+	find . -iname "*.amr" -type f >> "$pl"
+
+	count=$(cat "$pl" | wc -l)
+	if [ ${count} -lt 1 ]; then message "Упс!" "В папке \""${PWD}"\" медиафайлов формата AMR не найдено!" 5 14; power_off="Off"
+	return; fi
+	
+	# сортирую и резервирую список
+	sort "$pl" > "$tmp0"; cp "$tmp0" "$pl"
+
+	# строю список для диалога выбора
+	count=$(cat ${pl}|wc -l)
+	# Добавляю первым пунктом выбор всех файлов
+	echo "${SELECT_ALL}" > ${tmp0}; cat ${pl} >> ${tmp0}
+	# определяю размер окна выбора файлов
+	wd=0
+	while read line; do if [ ${#line} -gt ${wd} ];then wd=${#line};fi
+	done < "${tmp0}"; ((wd*=6)); ((wd+=100))
+	if [ ${wd} -gt 1024 ]; then wd=1024; fi
+	hg=$[count*27]; if [ ${hg} -gt 768 ]; then hg=768; fi
+
+	# вывожу диалог выбора файлов
+	play_beep 9
+	IFS=$'|'
+	lst=TRUE
+	while read line; do lst="${lst}|${line}|FALSE"; done < "${tmp0}"
+	lst=${lst::-6}
+	choise=$(zenity --list --checklist --multiple --column 'Выбор' --column 'Имя файла' \
+		${lst} --title="Найдено в папке: $(readlink -f ${PWD})" --separator="\n" \
+		--text="Найдено ${count} файла(ов),\r\nВыбери файлы для обработки:" \
+		--width=${wd} --height=${hg} )
+	unset IFS
+	if [ ${#choise} -lt 1 ];then message "Ай-яй-яй!" "Не выбрано ни одного файла" 10 2; power_off="Off"; return; fi
+
+	# получаю список выбранных файлов
+	res=$(echo ${choise} | grep "${SELECT_ALL}")
+	if [ "${res}_" = "_" ]; then
+		echo "${choise}" > "${tmp0}"
+		# снова сортирую список ибо нажатием на табы zenity может изменять порядок файлов
+		sort "$tmp0" > "$pl"
+		rm "${tmp0}"
+	fi
+}
+
+begin(){
+# начинаю цикл построчного чтения созданного плейлиста и конвертирования файлов
+# столь хитрая конструкция while read <&10... применена в силу вывода утилитой
+# ffmpeg в стандарный поток и как следствие вылет при первой-же интерации цикла while
+count=$(cat "${pl}" | wc -l)
+vl=$(( $volume / 100 )).$(( $volume % 100 ))
+cnt=0
+exec 10<"${pl}"
+while read name <&10
+do
+	bn=$(basename "${name}")
+	dir=$(dirname "${name}")
+	((cnt++))
+
+	title="$(echo "${bn}" | head -c -4)"
+	base_new_name="$(echo ${title} | sed 's/ /_/g')ogg"
+	new_name="${dir}/${base_new_name}"
+
+	if [ ! $rate -eq 777 ];then
+		info="${dir}/${list_name}"
+		# создаю шапку плейлиста m3u
+		if [ ! -f "${info}" ]; then
+			echo "#EXTM3U" > "$info"; echo >> "$info"
+		fi
+		ffprobe "${name}" > "${tmp0}" 2>&1
+		timestamp=$(grep Duration "${tmp0}"|awk '{print $2}' | head -c 8)
+		echo "#EXTINF:${timestamp},$title - $(echo  "$bn" | head -c -5)" >> "$info"
+		echo "${base_new_name}" >> "$info"
+		echo "" >> "$info"
+	fi
+	
+	if [ -f "${new_name}" ]; then
+		ffprobe "${new_name}" > "${tmp0}" 2>&1
+		exist_len=$(grep Duration "${tmp0}"|awk '{print $2}' | head -c 5)
+		exist_ln=${timestamp:0:5}
+		if [ ! ${exist_len} = ${exist_ln} ];then rm "$new_name"
+		else notify-send "$CAPT" "Файл\n${base_new_name}\nуже существует, пропускаю!" -t 3000; continue
+		fi
+	fi
+	notify-send "Обработка:" "${name} - ${timestamp}" -t 4500
+	echo "# Обрабатываю ${cnt}-й файл из ${count}\r\n${bn} --> ${base_new_name}\r\nПродолжительность: ${timestamp}"
+
+
+	nice -n 19 ffmpeg -i "$name" -f wav - | oggenc --ignorelength -q 2 -o "$new_name" - > /dev/null 2>&1
+	
+	echo $(($cnt * 100 / $count))
+done | zenity --title="$CAPT" --progress --width=400 --auto-close
+
+message "$CAPT" "Перекодировка завершена!" 3 12
+
+# удаляю рабочие файлы
+rm "$pl" "${tmp0}" > /dev/null 2>&1
+}
+
+install_utils
+get_conf 0 100
+play_beep 13
+if [ ! "${1}_" = "_" ]; then # беру параметры и коммандной строки
+	rate=777
+	if [ -f "${pl}" ];then rm "${pl}"; fi
+	while [ "${1}" ]; do
+		if [ -f "${1}" ]; then	echo ${1} >> "${pl}"; fi
+		shift
+	done
+	begin
+else # бесконечный цикл выбора и обработки файлов
+	while [ 1 ]; do
+		prepare "$@"
+		# сохраняю параметры
+		update_conf
+		power_dialog
+		begin
+		poweroff
+	done
+fi
+quit_script

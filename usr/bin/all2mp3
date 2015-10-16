@@ -1,0 +1,12 @@
+#!/bin/bash
+# перекодирование аудиофайлов в mp3
+
+ext="amr\|awb\|wav\|ogg\|m4b\|mp4" # добавь требуемое расширение
+cd "$(zenity --title="Преобразование звуков в mp3" --file-selection --directory --filename="`pwd`")"
+
+for fn in *; do
+if [ "$(echo ${fn}|grep ${ext})_" = "_" ]; then continue; fi
+fn1="${fn::-3}mp3"
+echo "Пережевываю файл: $fn - $fn1"
+ffmpeg -i "$fn" -f wav - | lame -b 64 - "$fn1"
+done

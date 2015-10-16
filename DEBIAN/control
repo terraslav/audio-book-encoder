@@ -1,0 +1,9 @@
+Package: audio-book-encoder
+Version: 0.2
+Architecture: all
+Depends: zenity, mpg123, lame, libnotify-bin, python-mutagen, libvo-amrwbenc0, vorbis-tools
+Priority: optional
+Installed-Size: 212
+Section: AudioVideo
+Maintainer: Terechov Wladislav <asgrem@gmail.com>
+Description: Audio Book Encoder

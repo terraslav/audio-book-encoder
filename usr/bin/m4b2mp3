@@ -1,0 +1,335 @@
+#!/bin/bash
+# M4b(AAC) to Mp3 encoded script by Terraslav
+
+. includes.inc
+# название скрипта
+CAPT="m4b(AAC) to mp3 audio encoder by terraslav"
+DEFAULT_RATE=64
+
+
+test_volume(){
+fn="${2}"
+echo "Выбранный уровень громкости: "$1 > ${tmp2}
+echo "Тестирую первый раздел файла: `basename "$fn"`" >> ${tmp2}
+max_start=300	# ограничиваю старт первыми 300 секундами, чтобы ffmpeg долго не "думал"
+max=${3}
+if [ ${max} -gt ${max_start} ]; then max=${max_start}; fi
+let start=$RANDOM%${max};
+echo "Продолжительность: $3\nStart: $start" >> ${tmp2}
+vl=$(( $1 / 100 )).$(( $1 % 100 ))
+ffmpeg -ss ${start} -i "${fn}" -af volume=$vl -f wav - | ffplay - &
+zenity --info --modal --title="$CAPT" --text="$(cat ${tmp2})"
+killall ffmpeg ffplay
+rm "${tmp2}"
+}
+
+install_utils
+play_beep 10
+
+# читаю параметры
+conf_dir="`dirname $(readlink -f ${conf})`"
+if [ -d "${conf_dir}" ];then
+	if [ -f "$conf" ];then
+		work_path=$(grep 'Path:' ${conf} | cut -f2 -d: | sed 's/^[ \t]*//'); cd "${work_path}"
+		rate=$(grep 'Rate' "${conf}" | awk '{print $2}')
+		volume=$(grep 'Volume' "${conf}" | awk '{print $2}')
+	else	set_def_conf $DEFAULT_RATE 100
+	fi
+else mkdir "${conf_dir}"
+	set_def_conf $DEFAULT_RATE 100
+fi
+
+if [ "${1}_" = "_" ]; then
+	# определяю рабочий директорий
+	work_path=$(zenity --title="$script_name" --file-selection --directory --filename="`pwd`")
+	if [ -d "${work_path}" ]; then cd "${work_path}"; update_conf; else quit_script; fi
+
+	# завожу поиск файлов
+	find . -iname "*.m4b" -type f > "$tmp1"
+
+	# сортирую список
+	sort "$tmp1" > "$tmp2"; mv "$tmp2" "$tmp1"
+	count=$(cat "$tmp1" | wc -l)
+	if [ $count -lt 1 ]; then
+		rm "$tmp1" > /dev/null 2>&1
+		message "$CAPT" "Медиафайлов формата M4B в папке \"${PWD}\" не нашел!" 10
+		quit_script
+	fi
+else
+	[ -f "${tmp1}" ] && rm "${tmp1}"
+	while [[ "${1}_" != "_" ]]; do
+		echo ${1} >> "${tmp1}"
+		shift
+	done
+	count=$(cat "$tmp1" | wc -l)
+	if [ $count -lt 1 ]; then
+		message "$CAPT" "Медиафайл(ы):\r\n$(cat "${tmp1}")\r\nне найдены!!!" 10
+		rm "$tmp1" > /dev/null 2>&1
+		quit_script
+	fi
+fi
+
+IFS=$'|'
+lst=; while read line; do lst="${lst}TRUE|${line}|";done < "$tmp1"
+res=$(zenity --list --hide-header --checklist --multiple --separator="\n" \
+	--title="$CAPT" --text="Выберите медиа-файлы обработки" \
+	--width=600 --height=400 --column="Выбрать" --column="файлы" $lst)
+if [ $? -eq 1 ] || [ ${#res} -lt 1 ];then
+	rm "$tmp1" > /dev/null 2>&1
+	message "${CAPT}" "Не выбраны файлы.\n\rЗакругляюсь." 10
+	quit_script
+fi
+unset IFS
+
+if [ -f "$tmp3" ]; then rm "$tmp3"; fi
+count=$(echo "$res"|wc -l)
+if [ $count -gt 0 ]; then
+	count=0
+	IFS='\n'
+	for line in $res; do
+		if [ ${#line} -eq 0 ]; then break; fi
+		echo "$line" | sed 's/^\.\///' >> "$tmp3"
+	done
+	unset IFS
+else	echo "$res" | sed 's/^\.\///' > "$tmp3"; fi
+
+pref_count=1	# глобальный счетчик для цифрового префикса файлов
+param_question=0
+
+power_dialog
+
+# коренной цикл выборки и обработки m4b файлов
+exec 11<"$tmp3"
+while read name <&11
+do
+if [ ! -f "$name" ]; then quit_script; fi
+
+dirpath=`dirname "$name"`
+name=$(basename "$name")
+cd "$dirpath"
+
+message "${CAPT}" "Подготовка к обработке: $(basename "$name")" 10 &
+
+# чтение параметров медиафайла через утилиту ffprobe
+ffprobe -i "$name" > "$tmp0" 2>&1
+
+# парсим некоторые текстовые данные из считанных параметров
+Duration=`grep Duration: "$tmp0" | awk '{print $2}' | cut -f1 -d.`
+Title=""
+Album=`grep " album " "$tmp0" | cut -f2 -d: | sed 's/^[ \t]*//'`
+Album_Artist=`grep "album_artist" "$tmp0" | cut -f2 -d: | sed 's/^[ \t]*//'`
+Lyrics=`grep "lyrics" "$tmp0" | cut -f2 -d: | sed 's/^[ \t]*//'`
+Genre=`grep "genre" "$tmp0" | cut -f2 -d: | sed 's/^[ \t]*//'`
+Artist=`grep " artist" "$tmp0" | cut -f2 -d: | sed 's/^[ \t]*//'`
+Date=`grep "date" "$tmp0" | cut -f2 -d: | sed 's/^[ \t]*//'`
+Rate=`grep "Audio:" "$tmp0" | cut -f5 -d, | sed 's/^[ \t]*//' | awk '{print $1}'`
+
+# удаляю последний символ описания, иногда он приводит к ошибке определения UTF-8 кодировки
+res=${#Lyrics}
+if [ $res -gt 1 ];then Lyrics=${Lyrics:0:$[res-1]};fi
+
+# создаем плейлист по временным меткам файла
+count=0
+start=0
+len="00:00:00"
+total_len=0
+if [ -f "$tmp1" ];then rm "$tmp1"; fi
+
+exec 10<"$tmp0"
+while read nm <&10
+do
+	file_name="$count".mp3
+	res=`echo "$nm" | grep "title "`
+	if [ ! "$res"_ = "_" ]; then
+		if [ $count = 0 ]; then
+		count=1
+			Title=`echo "$nm" | cut -f2 -d: | sed 's/^[ \t]*//'`
+		else
+			orig_name=`echo "$nm" | cut -f2 -d: | sed 's/^[ \t]*//'`
+			pref=$pref_count
+			((pref_count++))
+			if [ $pref -lt 10 ]; then pref="00$pref"
+			else if [ $pref -lt 100 ]; then pref="0$pref"; fi; fi
+			file_name="$pref-`echo "$orig_name" | sed 's/ /_/g'`"
+
+			# проверка и ограничение максимальной длины имени файла
+			if [ ${#file_name} -gt $MAX_FILE_NAME ];then
+				file_name=${file_name:0:$MAX_FILE_NAME}
+			fi
+			file_name="$file_name".mp3
+			
+			echo "$orig_name" >> "$tmp1"
+			echo "$file_name $start $len $len_sec" >> "$tmp1"
+			
+			count=$[count+1]
+		fi
+	else if [ ! "`echo "$nm" | grep Chapter`"_ = "_" ]; then
+		start=`echo "$nm" | awk '{print $4}' | cut -f1 -d.`
+		end=`echo "$nm" | awk '{print $6}' | cut -f1 -d.`
+		len_sec=$[end-start] # определяю длину главы
+		# преобразую в понятный для ffmpeg формат
+		sec=$[len_sec%60]; min=$[len_sec/60]; hour=$[min/60]; min=$[min%60];
+		if [ $hour -lt 10 ];then hour="0$hour"; fi
+		if [ $min -lt 10 ];then min="0$min"; fi
+		if [ $sec -lt 10 ];then sec="0$sec"; fi
+		len="$hour:$min:$sec"
+		total_len=$[total_len+len_sec]
+	fi fi
+done
+
+killall zenity > /dev/null 2>&1
+
+set_param=1
+if [ ${param_question} -eq 1 ]; then
+	play_beep
+	zenity --question --title="${CAPT}" --default-cancel --timeout=30 \
+	--text="Изменить громкость и/или битрейт для следующего файла:\r\n${name}"
+	if [ ! $? -eq 0 ];then set_param=0; fi
+fi
+
+if [ ${set_param} -eq 1 ]; then
+	# запрашиваю битрейт(в интерации, т.е. отдельно для каждого m4b файла)
+	zenity --question --title="${CAPT}" \
+	--text="Битрейт входного файла: "${Rate}" Kbit/sec\r\nБитрейт целевого файла: $rate kbit/sec\r\nИзменить?"
+	if [ $? -eq 0 ];then
+		rt=$(zenity --title="$CAPT" --list --radiolist \
+			--text="Выбери желаемый битрейт для MP3" \
+			--column="Выбор" --column="Битрейт kbit/sec" \
+			FALSE 8 FALSE 16 FALSE 24 FALSE 32 FALSE 40 FALSE 48 TRUE 64 \
+			FALSE 80 FALSE 96 FALSE 112 FALSE 128 FALSE 160 FALSE 192 \
+			FALSE 224 FALSE 256 FALSE 320)
+		if [ $? -eq 0 ];then rate=${rt};fi
+	fi
+
+	# Устанавливаю громкость
+	while [ 1 ]
+		do
+		rs1=$(zenity --scale --title="Уровень громкости" \
+		--text="Установите желаемый уровень громкости в процентах" \
+		--min-value=30 --max-value=400 --value=$volume --step=5)
+		if [ $? -eq 0 ];then volume=$rs1; else quit_script; fi
+		zenity --question --title="Уровень громкости" \
+			--text="Прослушать семпл?" \
+			--cancel-label="Принять и продолжить" --ok-label="Прослушать"
+		if [ ! $? -eq 0 ];then	break
+		else test_volume $volume "${name}" $(sed -n '2p' "${tmp1}" | awk '{print $4}')
+		fi
+	done
+fi
+param_question=1
+update_conf
+
+# начинаем собственно перекодировку
+message "$CAPT" "Перекодирую: $(basename "${name}")" 5 &
+
+vl=$(( $volume / 100 )).$(( $volume % 100 ))
+((count--))
+
+if [ $count -lt 1 ];then	# если в файле нет разбиения на части обрабатываем одним блоком
+	new_name="${name:0:-3}mp3"
+	nice -n 19 ffmpeg -i "$name" -f wav - | lame -b $rate --id3v2-only \
+		--tt "${Title}" --ta "${Artist}" --tl "${Album}" --tg 28 --tc "${Lyrics}" \
+		--ty "${date}" - "$new_name"
+else
+	# создаём папку для новых файлов
+	dirname=${name:0:-4}
+	[ ! -d "$dirname" ] && mkdir "$dirname"
+	cd "$dirname"
+
+	# создаём плейлист m3u
+	info="$Title".m3u
+	echo "#EXTM3U $Album_Artist" > "$info"
+	echo >> "$info"
+
+	while read ofn; do
+		read nm
+		len=`echo "$nm" | awk '{print $4}'`
+		file_name=`echo "$nm" | awk '{print $1}'`
+		echo "#EXTINF:$len,$Title - $ofn" >> "$info"
+		echo "$file_name" >> "$info"
+		echo "" >> "$info"
+	done < "$tmp1"
+
+	# сбрасываем стринговые переменные, если они не найдены в метаданных файла
+	if [ "$Title"_ = "_" ]; then Title=NoName; fi
+	if [ "$Artist"_ = "_" ]; then Artist=NoName; fi
+	if [ "$Lyrics"_ = "_" ]; then Lyrics="Нет описания"; fi
+	if [ "$Genre"_ = "_" ]; then Genre="Неуказан"; fi
+	if [ "$Album_Artist"_ = "_" ]; then Album_Artist=NoName; fi
+	if [ "$Date"_ = "_" ]; then Date="Неуказано"; fi
+
+	# создаём информационный файл
+	info="$Title".info
+
+cat > "$info" << EOF
+Название: $Title
+Жанр: ${Genre}
+Автор: ${Artist}
+Исполнитель: ${Album_Artist}
+Описание: ${Lyrics}
+Продолжительность: ${Duration}
+
+Разделы:
+EOF
+
+	while read ofn; do
+		read nm
+		echo "$ofn - `echo "$nm"|awk '{print $3}'`" >> "$info"
+	done < "$tmp1"
+
+	cd ..
+	killall zenity > /dev/null 2>&1
+
+	# начинаем цикл обработки инклюзивных частей
+	cnt=0
+	current_len=0
+	ofn=""
+	exec 10<"$tmp1"
+	while read nm <&10
+	do
+		cnt=$[cnt+1]
+		if [ $[cnt%2] -eq 0 ];then
+
+			# выводим информацию об обрабатываем файле в окошко zenity
+			echo "# Обрабатываю $[cnt/2]-й файл из $count\r\nПродолжительность \
+				$(echo "$nm"|awk '{print $3}')\r\n$ofn"
+
+			# определяем временные точки
+			new_name=`echo "$nm" | awk '{print $1}'`
+			start=`echo "$nm" | awk '{print $2}'`
+			len=`echo "$nm" | awk '{print $3}'`
+			
+			# и транскодируем разделы
+			if [ ! -f "${new_name}" ];then
+				nice -n 19 ffmpeg -ss $start -t $len -i "$name" -af volume=$vl -f wav - \
+				| lame -b $rate --id3v2-only --tt "${ofn}" --ta "${Artist}" \
+				--tl "${Album}" --tg 28 --tc "${Lyrics}" --ty "${Date}" \
+				--tn $(($cnt/2)) - "$dirname/$new_name"
+			fi
+			# мониторим процесс обработки в zenity
+			clen=`echo "$nm" | awk '{print $4}'`
+			current_len=$[current_len+clen]
+			echo $(($current_len * 100 / $total_len))			
+		else
+			# читаем имя раздела
+			ofn="$nm"
+		fi
+	done | zenity --title="$Title" --progress --auto-close --auto-kill
+fi
+	play_beep &
+done # конец цикла выборки m4b файлов
+
+play_beep 1
+zenity --question --title="Обработка завершена" \
+	--text="Удалить оригинальные медиа-файлы?" --default-cancel --timeout=60
+if [ $? -eq 0 ];then
+	notify-send "$CAPT" "Удаляю исходные файлы!" -t 5000 
+	while read nm; do
+		rm "$nm"
+	done < "$tmp3"
+fi
+
+rm "$tmp0" "$tmp1" "$tmp2" "$tmp3" > /dev/null 2>&1
+
+poweroff
+quit_script

@@ -1,0 +1,57 @@
+#!/bin/bash
+
+utils="TRUE|MP3 => AWB|FALSE|M4B => MP3|FALSE|M4B => AWB|FALSE|AWB => OGG"
+utils="${utils}|FALSE|AWB => MP3|FALSE|All => MP3|FALSE|MP3 Tags Encoder"
+
+if [ ! "${1}_" = "_" ];then
+	ext="${1: -3}"
+	case "$ext" in
+	mp3 | MP3 )
+		mp32awb "$@"
+		exit 0
+		;;
+	m4b | M4B )
+		m4b2awb "$@"
+		exit 0
+		;;
+	awb | AWB )
+		awb2ogg "$@"
+		exit 0
+		;;
+	* )
+		exit 1
+		;;
+	esac
+fi
+
+while [ 1 ]; do
+	IFS=$'|'
+	res=$(zenity --list --radiolist --column="Выбор" --column="Утилиты" \
+		--title="Выбор утилиты" --text="Выберите требуемое действие" $utils)
+	unset IFS
+	case "$res" in
+	"MP3 => AWB" )
+		mp32awb
+		;;
+	"M4B => AWB" )
+		m4b2awb
+		;;
+	"M4B => MP3" )
+		m4b2mp3
+		;;
+	"AWB => MP3" )
+		awb2mp3
+		;;
+	"AWB => OGG" )
+		awb2ogg
+		;;
+	"All => MP3" )
+		all2mp3
+		;;
+	"MP3 Tags Encoder" )
+		mp3tagenc
+		;;
+	*	)
+		exit 0
+	esac
+done

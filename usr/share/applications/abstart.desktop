@@ -1,0 +1,15 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Version=0.2
+Name=AudioBookEncoders
+Comment=AudioBook Encoders
+Name[ru]=Конвертер аудиокниг
+Comment[ru]=Перекодирование аудиокниг
+Name[ru_RU]=Конвертер аудиокниг
+Icon=abstart
+Categories=AudioVideo;
+Exec=abstart
+TryExec=abstart
+Terminal=false
+Type=Application
+MimeType=audio/mp3;audio/mp4;audio/amr-wb

@@ -1,0 +1,194 @@
+#!/bin/bash
+# Mp3 to AMR-WB encoded script by Terraslav
+
+. includes.inc
+# название скрипта
+CAPT="MP3 to ARM-WB audio encoder script by terraslav"
+DEFAULT_RATE=12650
+list_name=PlayList.m3u
+
+test_volume(){
+# выбираю случайный файл
+count=$(cat "$pl" | wc -l)
+let count=$RANDOM%${count}
+((count++))
+fn=$(cat "$pl" | sed -n ${count}p)
+ffprobe "${fn}" > "${tmp3}" 2>&1
+len=$(grep Duration "${tmp3}"|awk '{print $2}' | head -c 8)
+rm "${tmp3}"
+hr=${len:0:2}; if [ ${hr:0:1} = "0" ]; then hr=${hr:1:1};fi
+min=${len:3:2}; if [ ${min:0:1} = "0" ]; then min=${min:1:1};fi
+sec=${len:6:2}; if [ ${sec:0:1} = "0" ]; then sec=${sec:1:1};fi
+let ln=$hr*3600+$min*60+$sec
+if [ ${ln} -lt 1 ]; then ln=1; fi
+
+let start=$ln-$MIN_SAMPLE_LEN
+if [ $start -lt 0 ]; then start=0
+else let start=$RANDOM%${start};
+fi
+ln=$((ln-start))
+vl=$(( $1 / 100 )).$(( $1 % 100 ))
+ffmpeg -ss $start -i "$fn" -ac 1 -ab $rate -ar 16000 -af volume=$vl -acodec libvo_amrwbenc -f amr - | ffplay - &
+message "`basename "${fn}"` - ${1}% громкости" "\t\t\t\t" ${ln}
+killall ffmpeg ffplay
+}
+
+begin(){
+# Процедура поиска и конвертирования медиафайлов
+if [ $1 ]; then
+	play_beep 9
+	if [ -f "${pl}" ];then rm "${pl}"; fi
+	while [ ${1} ]; do
+		if [ -f "${1}" ]; then echo "${1}" >> "${pl}"; fi
+		shift
+	done
+else
+	play_beep 13
+	# определяю путь к файлам
+	work_path=$(zenity --title="Выбери папку для поиска медиафайлов" --file-selection --directory --filename="`pwd`")
+	if [ -d "${work_path}" ]; then cd "${work_path}"; update_conf; else quit_script; fi
+
+	# поиск медиафайлов
+	notify-send "$CAPT" "Выполняю поиск медиафайлов" -t 2000
+	find . -iname "*.mp3" -type f > "$pl"
+
+	count=$(cat "$pl" | wc -l)
+	if [ ${count} -lt 1 ]; then message "Упс!" "В папке \""${PWD}"\" медиафайлов mp3 не найдено!" 5 14; power_off="Off"
+	return; fi
+
+	# сортирую и резервирую список
+	sort "$pl" > "$tmp0"; cp "$tmp0" "$pl"
+
+	## строю список для диалога выбора
+	count=$(cat ${pl}|wc -l)
+	# Добавляю первым пунктом выбор всех файлов
+	echo "${SELECT_ALL}" > ${tmp0}; cat ${pl} >> ${tmp0}
+
+	# определяю размер окна выбора файлов
+	wd=0
+	while read line; do if [ ${#line} -gt ${wd} ];then wd=${#line};fi
+	done < "${tmp0}"; ((wd*=6)); ((wd+=100))
+	if [ ${wd} -gt 1024 ]; then wd=1024; fi
+	hg=$[count*27]; if [ ${hg} -gt 768 ]; then hg=768; fi
+
+	# вывожу диалог выбора файлов
+	play_beep 9
+	IFS=$'|'
+	lst=TRUE; while read line; do lst="${lst}|${line}|FALSE"; done < "${tmp0}"
+	lst=${lst::-6}
+	choise=$(zenity --list --checklist --multiple --column 'Выбор' --column 'Имя файла' \
+		${lst} --title="Найдено в папке: $(readlink -f ${PWD})" --separator="\n" \
+		--text="Найдено ${count} файла(ов),\r\nВыбери файлы для обработки:" \
+		--width=${wd} --height=${hg} )
+	if [ ${#choise} -lt 1 ];then message "Ай-яй-яй!" "Не выбрано ни одного файла" 10 2; power_off="Off"; return; fi
+	unset IFS
+
+	# получаю список выбранных файлов
+	res=$(echo ${choise} | grep "${SELECT_ALL}")
+	if [ "${res}_" = "_" ]; then
+		echo "${choise}" > "${tmp0}"
+		# снова сортирую список ибо нажатием на табы zenity может изменять порядок файлов
+		sort "$tmp0" > "$pl"
+		rm "${tmp0}"
+	fi
+fi
+
+zenity --question --title="$CAPT" --text="Установленны:\r\nБитрейт AWB - $rate bit/sec\r\nУровень громкости - ${volume}%\r\nОтключение компьютера - ${power_off}\r\nИзменить эти параметры?"
+if [ $? -eq 0 ];then
+	# определяю битрейт
+	rate_setup
+
+	# определяю уровень громкости
+	while [ 1 ]; do
+		rs1=$(zenity --scale --title="Уровень громкости" --text="Усановите желаемый уровень громкости в процентах" --min-value=50 --max-value=300 --value=$volume --step=10)
+		if [ $? -eq 0 ];then volume=$rs1; else power_off="Off"; return; fi
+		zenity --question --title="Уровень громкости" --text="Для предотвращения искажений звука рекомендуется прослушать семпл, сжатый кодеком amr-wb.\r\nЕсли звук имеет неприятные для слуха искажается в максимальных пиках, следует немного убавить уровень громкости.\r\nПрослушать семпл, сжатый кодеком amr-wb?" --cancel-label="Принять и продолжить" --ok-label="Прослушать"
+		if [ ! $? -eq 0 ];then break
+		else test_volume $volume
+		fi
+		play_beep 9
+	done
+	# сохраняю параметры
+	update_conf
+#	power_dialog
+fi
+
+# начинаю цикл построчного чтения созданного плейлиста и конвертирования файлов
+# столь хитрая конструкция while read <&10... применена в силу вывода утилитой
+# ffmpeg в стандарный поток и как следствие вылет при первой-же интерации цикла while
+count=$(cat "${pl}" | wc -l)
+vl=$(( $volume / 100 )).$(( $volume % 100 ))
+cnt=0
+dir_save="!"
+exec 10<"${pl}"
+while read name <&10
+do
+	
+#	bn=$(basename "${name}")
+	bn=${name%/*}
+#	dir=$(dirname "${name}")
+	dir=${name##*/}
+	if [ ! "${dir}" = "${dir_save}" ];then dir_save="${dir}"; cnt=0; fi
+	((cnt++))
+
+	info="${dir}/${list_name}"
+	# создаю шапку плейлиста m3u
+	if [ ! -f "${info}" ]; then echo "#EXTM3U" > "$info"; echo >> "$info"; fi
+	
+	ffprobe "${name}" > "${tmp3}" 2>&1
+	timestamp=$(grep Duration "${tmp3}"|awk '{print $2}' | head -c 8)
+	title=$(grep -i title "${tmp3}" | head -n 1 | cut -f2 -d: | sed 's/^[ \t]*//')
+	if [ "${title}_" = "_" ]; then title="$(echo ${bn} | head -c -5)"; fi
+	numb=${cnt}; if [ ${cnt} -lt 10 ]; then numb="0${numb}"; fi
+	if [ ${count} -gt 99 ] && [ ${cnt} -lt 100 ];then numb="0${numb}"; fi	
+
+	#замена в имени нового файла пробелов на подчеркивание и удаление точек с кавычками - в имени файла это лишнее
+	base_new_name="${numb}-$(echo ${title} | sed 's/ /_/g;s/\.//g;s/\"//g').awb"
+	new_name="${dir}/${base_new_name}"
+
+	if [ -f "${new_name}" ]; then
+		ffprobe "${new_name}" > "${tmp3}" 2>&1
+		exist_len=$(grep Duration "${tmp3}"|awk '{print $2}' | head -c 5)
+		exist_ln=${timestamp:0:5}
+		if [ ! ${exist_len} = ${exist_ln} ];then rm "$new_name"
+		else echo "# Файл ${name} уже обработан, пропускаю!"
+	fi fi
+	if [ ! -f "$new_name" ]; then
+		notify-send "${title}" "${name} - ${timestamp}" -t 4500
+		echo "# Обрабатываю ${cnt}-й файл из ${count}\r\n${bn} --> ${base_new_name}\r\nПродолжительность: ${timestamp}"
+
+		# nice я применил для придания процессу самого минимального
+		# приоритета дабы ffmpeg не тормозил работу других приложений
+		nice -n 19 ffmpeg -i "$name" -ac 1 -ab $rate -ar 16000 -af volume=$vl -f amr -acodec libvo_amrwbenc "$new_name"
+		echo "#EXTINF:${timestamp},$title - $(echo  "$bn" | head -c -5)" >> "$info"
+		echo "${base_new_name}" >> "$info"
+		echo "" >> "$info"
+	fi
+	
+	# сохраняю путь/имя в постплейлист для функции удаления оригиналов
+	if [ -f "$new_name" ];then echo "$name" >> "${tmp1}"; fi
+	
+	echo $(($cnt * 100 / $count))
+done | zenity --title="$CAPT" --progress --width=400 --auto-close
+
+# обработка закончена, запрашиваю удаление оригиналов
+message "$CAPT" "Перекодировка завершена!" 10 12
+zenity --question --title="${CAPT}" --text="Удалить исходные mp3 файлы?"
+if [ $? -eq 0 ];then notify-send "$CAPT" "Удаляю исходные медиафайлы!" -t 2000 
+	while read name; do rm "$name";	done < "${tmp1}"
+fi
+
+# удаляю рабочие файлы
+rm "$pl" "${tmp3}" "${tmp1}" > /dev/null 2>&1
+}
+
+install_utils
+get_conf $DEFAULT_RATE 100
+# бесконечный цикл выбора и обработки файлов
+while [ 1 ]
+do
+	begin "$@"
+#	poweroff
+	if [ ${1} ]; then break; fi
+done
+quit_script
